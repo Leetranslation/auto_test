@@ -35,6 +35,8 @@ platform:
   runner:
     python: ${RUNNER_PYTHON:python}
     ui-script: ${RUNNER_UI_SCRIPT:runner/ui_runner.py}
+  artifact:
+    dir: ${ARTIFACT_DIR:artifacts}
 
 springdoc:
   api-docs:

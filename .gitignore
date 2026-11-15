@@ -12,6 +12,10 @@ frontend/*.timestamp-*.mjs
 __pycache__/
 *.pyc
 runner/*.png
+runner/_out.json
+
+# 执行产物归档
+artifacts/
 
 # IDE
 .idea/

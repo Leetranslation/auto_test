@@ -56,6 +56,9 @@ public class ExecutionService {
     @Value("${platform.runner.ui-script}")
     private String uiScript;
 
+    @Value("${platform.artifact.dir:artifacts}")
+    private String artifactDir;
+
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10)).build();
 
@@ -237,7 +240,7 @@ public class ExecutionService {
                     result.passed = (boolean) r.get("passed");
                 }
                 case "UI" -> {
-                    Map<String, Object> r = execUi(config, ctx.vars);
+                    Map<String, Object> r = execUi(config, ctx.vars, exec.getId());
                     step.setStatus((boolean) r.get("passed") ? "PASSED" : "FAILED");
                     step.setOutputSnapshot(snapshot(r.get("output")));
                     if (!(boolean) r.get("passed")) step.setErrorMessage(String.valueOf(r.get("error")));
@@ -332,17 +335,23 @@ public class ExecutionService {
         return result;
     }
 
-    private Map<String, Object> execUi(JsonNode config, Map<String, Object> vars) throws Exception {
+    private Map<String, Object> execUi(JsonNode config, Map<String, Object> vars, Long executionId) throws Exception {
         String baseUrl = config.path("baseUrl").asText();
         Map<String, Object> task = new HashMap<>();
         task.put("baseUrl", baseUrl);
         task.put("timeoutMs", config.path("timeoutMs").asInt(10000));
+        task.put("browserType", config.path("browserType").asText("CHROMIUM"));
         task.put("steps", objectMapper.convertValue(config.path("steps"), List.class));
+        if (config.has("retry")) task.put("retry", objectMapper.convertValue(config.path("retry"), Map.class));
         if (vars.containsKey("token")) {
             Map<String, Object> localStorage = new HashMap<>();
             localStorage.put("token", vars.get("token"));
             task.put("storageState", Map.of("localStorage", localStorage));
         }
+        // 统一归档：artifacts/{executionId}/ui
+        String outDir = new java.io.File(artifactDir, executionId + "/ui").getAbsolutePath();
+        task.put("outputDir", outDir);
+
         Path tmp = Files.createTempFile("ui_task_", ".json");
         Files.writeString(tmp, objectMapper.writeValueAsString(task));
 
@@ -359,7 +368,21 @@ public class ExecutionService {
             parsed.path("results").forEach(steps::add);
             boolean passed = steps.stream().allMatch(s -> "PASSED".equals(s.path("status").asText()));
             result.put("passed", passed);
-            result.put("output", out.length() > 500 ? out.substring(0, 500) : out);
+            // 解析并归档 trace + 截图（转为可访问 URL）
+            JsonNode artifacts = parsed.path("artifacts");
+            Map<String, Object> arts = new HashMap<>();
+            if (artifacts.isObject()) {
+                String trace = artifacts.path("trace").asText("");
+                if (!trace.isEmpty()) arts.put("trace", toArtifactUrl(trace));
+                List<String> shots = new ArrayList<>();
+                artifacts.path("screenshots").forEach(s -> shots.add(toArtifactUrl(s.asText())));
+                arts.put("screenshots", shots);
+            }
+            Map<String, Object> output = new HashMap<>();
+            output.put("passed", passed);
+            output.put("artifacts", arts);
+            output.put("output", truncate(out));
+            result.put("output", output);
             if (!passed) result.put("error", out);
         } catch (Exception e) {
             result.put("passed", false);
@@ -367,6 +390,19 @@ public class ExecutionService {
             result.put("output", out);
         }
         return result;
+    }
+
+    /** 绝对路径 → /api/artifact/... 相对 URL（供前端查看/下载） */
+    private String toArtifactUrl(String absPath) {
+        try {
+            String base = new java.io.File(artifactDir).getCanonicalPath().replace('\\', '/');
+            String p = new java.io.File(absPath).getCanonicalPath().replace('\\', '/');
+            if (p.startsWith(base)) {
+                return "/api/artifact/" + p.substring(base.length() + 1);
+            }
+        } catch (Exception ignored) {
+        }
+        return absPath;
     }
 
     private boolean evaluateAssert(JsonNode config, int status, String body) {

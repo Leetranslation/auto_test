@@ -39,6 +39,16 @@
           </el-table-column>
           <el-table-column prop="durationMs" label="耗时" width="80" />
           <el-table-column prop="errorMessage" label="错误" min-width="180" />
+          <el-table-column label="产物" min-width="200">
+            <template #default="{ row }">
+              <div v-if="artifactsOf(row)" class="artifacts">
+                <a v-if="artifactsOf(row).trace" :href="artifactsOf(row).trace" target="_blank" class="art-link">Trace</a>
+                <a v-for="(s, i) in (artifactsOf(row).screenshots || [])" :key="i" :href="s" target="_blank" class="art-link">
+                  <img :src="s" class="shot" :alt="'截图' + i" />
+                </a>
+              </div>
+            </template>
+          </el-table-column>
         </el-table>
         <h4>日志</h4>
         <el-timeline>
@@ -68,6 +78,15 @@ const detail = ref<any>(null)
 
 function statusType(s: string) {
   return s === 'PASSED' ? 'success' : s === 'FAILED' ? 'danger' : 'info'
+}
+
+function artifactsOf(row: any) {
+  try {
+    const o = typeof row.outputSnapshot === 'string' ? JSON.parse(row.outputSnapshot) : row.outputSnapshot
+    return o?.artifacts || null
+  } catch {
+    return null
+  }
 }
 
 async function loadProjects() {
@@ -128,5 +147,22 @@ pre {
   padding: 10px;
   max-height: 200px;
   overflow: auto;
+}
+.artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.art-link {
+  font-size: 12px;
+  color: #2563eb;
+  text-decoration: none;
+}
+.shot {
+  height: 40px;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  cursor: zoom-in;
 }
 </style>

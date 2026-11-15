@@ -1,0 +1,15 @@
+{
+  "executionId": 999,
+  "baseUrl": "http://127.0.0.1:5174",
+  "browserType": "CHROMIUM",
+  "viewport": {"width": 1280, "height": 720},
+  "timeoutMs": 10000,
+  "taskTimeoutMs": 120000,
+  "retry": {"maxAttempts": 2, "retryDelayMs": 200},
+  "outputDir": "E:/test_demo/autotest-platform/artifacts/999/ui",
+  "steps": [
+    {"action": "open", "url": "/"},
+    {"action": "screenshot"},
+    {"action": "assert", "locator": {"strategy": "TEXT", "value": "不存在的文本XYZ"}, "visible": true, "timeout": 2000}
+  ]
+}
