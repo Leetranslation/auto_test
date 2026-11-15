@@ -183,6 +183,10 @@ public class ExecutionService {
             }
 
             // ---- 6. 完成 + 报告 ----
+            try {
+                log(exec.getId(), null, "INFO", "变量快照: " + objectMapper.writeValueAsString(ctx.vars));
+            } catch (Exception ignored) {
+            }
             exec.setStatus(failed == 0 ? "PASSED" : "FAILED");
             exec.setFinishedAt(LocalDateTime.now());
             exec.setDurationMs(java.time.Duration.between(exec.getStartedAt(), exec.getFinishedAt()).toMillis());
