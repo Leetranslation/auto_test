@@ -90,6 +90,7 @@
             v-model:nodes="nodes"
             v-model:edges="edges"
             :node-types="nodeTypes"
+            :default-edge-options="defaultEdgeOptions"
             :default-viewport="{ zoom: 1 }"
             fit-view-on-init
             :delete-key-code="['Backspace', 'Delete']"
@@ -178,7 +179,7 @@
 <script setup lang="ts">
 import { computed, markRaw, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { VueFlow } from '@vue-flow/core'
+import { VueFlow, MarkerType } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import { MiniMap } from '@vue-flow/minimap'
@@ -193,6 +194,13 @@ import { execRun } from '@/api/exec'
 import { definitionList, serviceList } from '@/api/asset'
 
 const nodeTypes = markRaw({ scene: SceneNode })
+
+// 直角折线（正交走线）+ 灰色 + 实心箭头
+const defaultEdgeOptions = {
+  type: 'step',
+  markerEnd: MarkerType.ArrowClosed,
+  style: { stroke: '#9ca3af', strokeWidth: 1.5 }
+}
 
 const TYPE_TAGS: Record<string, string> = {
   START: '开始', END: '结束', API: 'API', UI: 'UI', ASSERT: '断言',
@@ -383,20 +391,25 @@ async function openEditor(row: any) {
     const graph: any = await sceneGraph(row.id)
     const parsed = typeof graph === 'string' ? JSON.parse(graph) : graph
     variables.value = parsed.variables || {}
-    nodes.value = (parsed.nodes || []).map((n: any) => ({
-      id: n.nodeKey || `node_${++nodeSeq}`,
-      type: 'scene',
-      position: { x: 120 + (nodeSeq % 4) * 220, y: 100 + Math.floor(nodeSeq / 4) * 140 },
-      data: {
-        nodeType: n.nodeType,
-        label: n.nodeName || n.nodeType,
-        apiDefinitionId: n.apiDefinitionId || null,
-        apiPath: n.apiPath || '',
-        apiMethod: n.apiMethod || '',
-        script: n.script || '',
-        configText: JSON.stringify(n.config || {})
+    nodes.value = (parsed.nodes || []).map((n: any) => {
+      nodeSeq++
+      const px = n.positionX ?? (120 + ((nodeSeq - 1) % 4) * 220)
+      const py = n.positionY ?? (100 + Math.floor((nodeSeq - 1) / 4) * 140)
+      return {
+        id: n.nodeKey || `node_${nodeSeq}`,
+        type: 'scene',
+        position: { x: px, y: py },
+        data: {
+          nodeType: n.nodeType,
+          label: n.nodeName || n.nodeType,
+          apiDefinitionId: n.apiDefinitionId || null,
+          apiPath: n.apiPath || '',
+          apiMethod: n.apiMethod || '',
+          script: n.script || '',
+          configText: JSON.stringify(n.config || {})
+        }
       }
-    }))
+    })
     edges.value = (parsed.edges || []).map((e: any) => ({
       id: `edge_${++edgeSeq}`,
       source: e.source,
@@ -450,6 +463,8 @@ function buildGraphJson() {
       apiPath: n.data.apiPath || '',
       apiMethod: n.data.apiMethod || '',
       script: n.data.script || '',
+      positionX: n.position?.x ?? 0,
+      positionY: n.position?.y ?? 0,
       config
     }
   })

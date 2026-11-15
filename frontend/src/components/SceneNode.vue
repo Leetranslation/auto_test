@@ -56,10 +56,10 @@ const typeTag = computed(() => TYPE_TAGS[props.data?.nodeType] || props.data?.no
   min-width: 140px;
   max-width: 220px;
   background: #fff;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
+  border: 1px solid #93c5fd;
+  border-radius: 4px;
   padding: 8px 12px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .node-name {
   color: #1f2937;
