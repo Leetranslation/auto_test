@@ -27,10 +27,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Slf4j
 @Service
@@ -78,6 +82,13 @@ public class ExecutionService {
         return exec;
     }
 
+    /**
+     * DAG 流程编排执行引擎：
+     * 1. 依据 edges 构建邻接表与入度；
+     * 2. 从 START 节点 / 入度为 0 的节点出发，按连接关系遍历；
+     * 3. CONDITION 节点按判断结果走 true/false 分支；
+     * 4. 无 edges 时（旧数据）退化为顺序链执行，保证兼容。
+     */
     private void runAsync(TestTask task, TestExecution exec) {
         try {
             exec.setStatus("RUNNING");
@@ -95,90 +106,80 @@ public class ExecutionService {
             exec.setVersionSnapshotJson(graphJson);
             executionMapper.updateById(exec);
 
-            JsonNode nodes = graph.path("nodes");
-            Map<String, Object> vars = new HashMap<>();
-            String lastBody = null;
-            int lastStatus = 0;
+            // ---- 1. 节点索引（nodeKey -> node）----
+            List<String> orderedKeys = new ArrayList<>();
+            Map<String, JsonNode> nodeByKey = new HashMap<>();
+            for (JsonNode n : graph.path("nodes")) {
+                String key = n.path("nodeKey").asText();
+                if (key.isEmpty()) key = "node_" + (orderedKeys.size() + 1);
+                orderedKeys.add(key);
+                nodeByKey.put(key, n);
+            }
+
+            // ---- 2. 边集合（旧数据无 edges 时顺序串链）----
+            List<JsonNode> edgeList = new ArrayList<>();
+            graph.path("edges").forEach(edgeList::add);
+            if (edgeList.isEmpty() && orderedKeys.size() > 1) {
+                for (int i = 0; i < orderedKeys.size() - 1; i++) {
+                    JsonNode e = objectMapper.createObjectNode()
+                            .put("source", orderedKeys.get(i))
+                            .put("target", orderedKeys.get(i + 1))
+                            .put("condition", "");
+                    edgeList.add(e);
+                }
+            }
+
+            // ---- 3. 邻接表 + 入度 ----
+            Map<String, List<JsonNode>> successors = new HashMap<>();
+            Map<String, Integer> inDegree = new HashMap<>();
+            for (String k : orderedKeys) inDegree.put(k, 0);
+            for (JsonNode e : edgeList) {
+                String src = e.path("source").asText();
+                String tgt = e.path("target").asText();
+                if (!nodeByKey.containsKey(src) || !nodeByKey.containsKey(tgt)) continue;
+                successors.computeIfAbsent(src, k -> new ArrayList<>()).add(e);
+                inDegree.merge(tgt, 1, Integer::sum);
+            }
+
+            // ---- 4. 起点：START 节点或入度为 0 的节点 ----
+            Deque<String> queue = new ArrayDeque<>();
+            for (String k : orderedKeys) {
+                JsonNode n = nodeByKey.get(k);
+                if ("START".equals(n.path("nodeType").asText()) || inDegree.getOrDefault(k, 0) == 0) {
+                    queue.offer(k);
+                }
+            }
+            if (queue.isEmpty() && !orderedKeys.isEmpty()) queue.offer(orderedKeys.get(0));
+
+            // ---- 5. 按 DAG 拓扑遍历执行 ----
+            ExecContext ctx = new ExecContext();
             int sort = 0;
             int passed = 0;
             int failed = 0;
+            Set<String> visited = new HashSet<>();
 
-            for (JsonNode node : nodes) {
+            while (!queue.isEmpty()) {
+                String key = queue.poll();
+                if (!visited.add(key)) continue; // 防环：每个节点只执行一次
+
+                JsonNode node = nodeByKey.get(key);
                 sort++;
-                String type = node.path("nodeType").asText();
-                String name = node.path("nodeName").asText(type);
-                String key = node.path("nodeKey").asText("node_" + sort);
-                JsonNode config = node.path("config");
-
-                StepExecution step = new StepExecution();
-                step.setExecutionId(exec.getId());
-                step.setNodeKey(key);
-                step.setStepName(name);
-                step.setStepType(type);
-                step.setSortNo(sort);
-                step.setIterationNo(0);
-                step.setAttemptNo(0);
-                step.setStatus("RUNNING");
-                step.setStartedAt(LocalDateTime.now());
-                stepMapper.insert(step);
-                log(exec.getId(), step.getId(), "INFO", "执行节点 " + type + " - " + name);
-
-                try {
-                    switch (type) {
-                        case "START", "END" -> {
-                            step.setStatus("PASSED");
-                            step.setOutputSnapshot("{}");
-                        }
-                        case "API" -> {
-                            Map<String, Object> r = execApi(config, vars);
-                            step.setStatus((boolean) r.get("passed") ? "PASSED" : "FAILED");
-                            step.setInputSnapshot(snapshot(r.get("input")));
-                            step.setOutputSnapshot(snapshot(r.get("output")));
-                            if (!(boolean) r.get("passed")) step.setErrorMessage(String.valueOf(r.get("error")));
-                            lastBody = (String) r.get("body");
-                            lastStatus = (int) r.get("status");
-                            applyExtracts(config, vars, lastBody);
-                        }
-                        case "UI" -> {
-                            Map<String, Object> r = execUi(config, vars);
-                            step.setStatus((boolean) r.get("passed") ? "PASSED" : "FAILED");
-                            step.setOutputSnapshot(snapshot(r.get("output")));
-                            if (!(boolean) r.get("passed")) step.setErrorMessage(String.valueOf(r.get("error")));
-                        }
-                        case "ASSERT" -> {
-                            boolean p = evaluateAssert(config, lastStatus, lastBody);
-                            step.setStatus(p ? "PASSED" : "FAILED");
-                            step.setOutputSnapshot("{\"passed\":" + p + "}");
-                            if (!p) step.setErrorMessage("断言失败");
-                        }
-                        case "EXTRACT" -> {
-                            applySingleExtract(config, vars, lastBody);
-                            step.setStatus("PASSED");
-                        }
-                        case "CONDITION" -> {
-                            boolean p = evaluateCondition(config, vars);
-                            step.setStatus(p ? "PASSED" : "FAILED");
-                            step.setOutputSnapshot("{\"result\":" + p + "}");
-                        }
-                        default -> {
-                            step.setStatus("FAILED");
-                            step.setErrorMessage("未知节点类型: " + type);
-                        }
-                    }
-                } catch (Exception e) {
-                    step.setStatus("FAILED");
-                    step.setErrorMessage(String.valueOf(e.getMessage()));
-                }
-
-                step.setFinishedAt(LocalDateTime.now());
-                step.setDurationMs(java.time.Duration.between(step.getStartedAt(), step.getFinishedAt()).toMillis());
-                stepMapper.updateById(step);
-                log(exec.getId(), step.getId(), step.getStatus().equals("PASSED") ? "INFO" : "ERROR",
-                        "节点 " + name + " " + step.getStatus() + (step.getErrorMessage() != null ? " - " + step.getErrorMessage() : ""));
-                if (step.getStatus().equals("PASSED")) passed++;
+                NodeResult nr = executeNode(exec, node, sort, ctx);
+                if (nr.passed) passed++;
                 else failed++;
+
+                // 决定后继：CONDITION 按结果走分支，其余走全部出边
+                for (JsonNode e : successors.getOrDefault(key, List.of())) {
+                    if (nr.isCondition) {
+                        String want = nr.conditionResult ? "true" : "false";
+                        if (!want.equals(e.path("condition").asText(""))) continue;
+                    }
+                    String tgt = e.path("target").asText();
+                    if (nodeByKey.containsKey(tgt)) queue.offer(tgt);
+                }
             }
 
+            // ---- 6. 完成 + 报告 ----
             exec.setStatus(failed == 0 ? "PASSED" : "FAILED");
             exec.setFinishedAt(LocalDateTime.now());
             exec.setDurationMs(java.time.Duration.between(exec.getStartedAt(), exec.getFinishedAt()).toMillis());
@@ -194,6 +195,92 @@ public class ExecutionService {
             log.error("执行异常", e);
             fail(exec, e.getMessage());
         }
+    }
+
+    /** 执行单个节点，记录 step_execution + 日志，返回结果与分支标志 */
+    private NodeResult executeNode(TestExecution exec, JsonNode node, int sort, ExecContext ctx) {
+        String type = node.path("nodeType").asText();
+        String name = node.path("nodeName").asText(type);
+        String key = node.path("nodeKey").asText("node_" + sort);
+        JsonNode config = node.path("config");
+
+        StepExecution step = new StepExecution();
+        step.setExecutionId(exec.getId());
+        step.setNodeKey(key);
+        step.setStepName(name);
+        step.setStepType(type);
+        step.setSortNo(sort);
+        step.setIterationNo(0);
+        step.setAttemptNo(0);
+        step.setStatus("RUNNING");
+        step.setStartedAt(LocalDateTime.now());
+        stepMapper.insert(step);
+        log(exec.getId(), step.getId(), "INFO", "执行节点 " + type + " - " + name);
+
+        NodeResult result = new NodeResult();
+        try {
+            switch (type) {
+                case "START", "END" -> {
+                    step.setStatus("PASSED");
+                    step.setOutputSnapshot("{}");
+                    result.passed = true;
+                }
+                case "API" -> {
+                    Map<String, Object> r = execApi(config, ctx.vars);
+                    step.setStatus((boolean) r.get("passed") ? "PASSED" : "FAILED");
+                    step.setInputSnapshot(snapshot(r.get("input")));
+                    step.setOutputSnapshot(snapshot(r.get("output")));
+                    if (!(boolean) r.get("passed")) step.setErrorMessage(String.valueOf(r.get("error")));
+                    ctx.lastBody = (String) r.get("body");
+                    ctx.lastStatus = (int) r.get("status");
+                    applyExtracts(config, ctx.vars, ctx.lastBody);
+                    result.passed = (boolean) r.get("passed");
+                }
+                case "UI" -> {
+                    Map<String, Object> r = execUi(config, ctx.vars);
+                    step.setStatus((boolean) r.get("passed") ? "PASSED" : "FAILED");
+                    step.setOutputSnapshot(snapshot(r.get("output")));
+                    if (!(boolean) r.get("passed")) step.setErrorMessage(String.valueOf(r.get("error")));
+                    result.passed = (boolean) r.get("passed");
+                }
+                case "ASSERT" -> {
+                    boolean p = evaluateAssert(config, ctx.lastStatus, ctx.lastBody);
+                    step.setStatus(p ? "PASSED" : "FAILED");
+                    step.setOutputSnapshot("{\"passed\":" + p + "}");
+                    if (!p) step.setErrorMessage("断言失败");
+                    result.passed = p;
+                }
+                case "EXTRACT" -> {
+                    applySingleExtract(config, ctx.vars, ctx.lastBody);
+                    step.setStatus("PASSED");
+                    result.passed = true;
+                }
+                case "CONDITION" -> {
+                    boolean p = evaluateCondition(config, ctx.vars);
+                    step.setStatus("PASSED"); // 条件节点本身是流程控制，不算失败
+                    step.setOutputSnapshot("{\"result\":" + p + "}");
+                    result.passed = true;
+                    result.isCondition = true;
+                    result.conditionResult = p;
+                }
+                default -> {
+                    step.setStatus("FAILED");
+                    step.setErrorMessage("未知节点类型: " + type);
+                    result.passed = false;
+                }
+            }
+        } catch (Exception e) {
+            step.setStatus("FAILED");
+            step.setErrorMessage(String.valueOf(e.getMessage()));
+            result.passed = false;
+        }
+
+        step.setFinishedAt(LocalDateTime.now());
+        step.setDurationMs(java.time.Duration.between(step.getStartedAt(), step.getFinishedAt()).toMillis());
+        stepMapper.updateById(step);
+        log(exec.getId(), step.getId(), step.getStatus().equals("PASSED") ? "INFO" : "ERROR",
+                "节点 " + name + " " + step.getStatus() + (step.getErrorMessage() != null ? " - " + step.getErrorMessage() : ""));
+        return result;
     }
 
     private Map<String, Object> execApi(JsonNode config, Map<String, Object> vars) throws Exception {
@@ -296,6 +383,13 @@ public class ExecutionService {
             case "EQ" -> left.equals(right);
             case "NE" -> !left.equals(right);
             case "CONTAINS" -> left.contains(right);
+            case "GT" -> {
+                try { yield Double.parseDouble(left) > Double.parseDouble(right); } catch (Exception e) { yield false; }
+            }
+            case "LT" -> {
+                try { yield Double.parseDouble(left) < Double.parseDouble(right); } catch (Exception e) { yield false; }
+            }
+            case "EXISTS" -> !left.isBlank();
             default -> false;
         };
     }
@@ -338,6 +432,24 @@ public class ExecutionService {
         }
     }
 
+    private void applySingleExtract(JsonNode config, Map<String, Object> vars, String body) {
+        if (body == null) return;
+        try {
+            String varName = config.path("varName").asText();
+            String path = config.path("path").asText();
+            JsonNode root = objectMapper.readTree(body);
+            JsonNode node = root;
+            for (String seg : path.split("\\.")) {
+                if (node == null) break;
+                node = node.path(seg);
+            }
+            if (node != null && !node.isMissingNode()) {
+                vars.put(varName, node.isTextual() ? node.asText() : node.toString());
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     private String substitute(String s, Map<String, Object> vars) {
         if (s == null) return "";
         for (Map.Entry<String, Object> e : vars.entrySet()) {
@@ -375,21 +487,17 @@ public class ExecutionService {
         executionMapper.updateById(exec);
     }
 
-    private void applySingleExtract(JsonNode config, Map<String, Object> vars, String body) {
-        if (body == null) return;
-        try {
-            String varName = config.path("varName").asText();
-            String path = config.path("path").asText();
-            JsonNode root = objectMapper.readTree(body);
-            JsonNode node = root;
-            for (String seg : path.split("\\.")) {
-                if (node == null) break;
-                node = node.path(seg);
-            }
-            if (node != null && !node.isMissingNode()) {
-                vars.put(varName, node.isTextual() ? node.asText() : node.toString());
-            }
-        } catch (Exception ignored) {
-        }
+    /** 执行上下文：跨节点共享变量与最近一次响应 */
+    private static class ExecContext {
+        final Map<String, Object> vars = new HashMap<>();
+        String lastBody;
+        int lastStatus;
+    }
+
+    /** 节点执行结果 */
+    private static class NodeResult {
+        boolean passed;
+        boolean isCondition;
+        boolean conditionResult;
     }
 }

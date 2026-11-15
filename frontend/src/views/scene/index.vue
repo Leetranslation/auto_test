@@ -38,7 +38,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="editorVisible" :title="'编排 - ' + currentSceneName" width="860px" top="5vh">
+    <el-dialog v-model="editorVisible" :title="'编排 - ' + currentSceneName" width="920px" top="4vh">
       <div class="toolbar">
         <el-button @click="addStep('START')">+ 开始</el-button>
         <el-button @click="addStep('API')">+ API 节点</el-button>
@@ -48,19 +48,41 @@
         <el-button @click="addStep('CONDITION')">+ 条件</el-button>
         <el-button @click="addStep('END')">+ 结束</el-button>
       </div>
-      <div v-for="(s, i) in steps" :key="i" class="step-row">
-        <span class="step-idx">{{ i + 1 }}</span>
+
+      <div class="hint">节点列表（顺序只影响显示，实际执行顺序由下面的「连线」决定；无连线时按列表顺序顺序执行）</div>
+      <div v-for="(s, i) in steps" :key="s.nodeKey" class="step-row">
+        <span class="step-idx" :title="s.nodeKey">{{ s.nodeKey }}</span>
         <el-select v-model="s.nodeType" style="width: 110px">
           <el-option v-for="t in ['START','API','UI','ASSERT','EXTRACT','CONDITION','END']" :key="t" :label="t" :value="t" />
         </el-select>
-        <el-input v-model="s.nodeName" placeholder="步骤名" style="width: 160px" />
+        <el-input v-model="s.nodeName" placeholder="步骤名" style="width: 150px" />
         <el-input v-model="s.configText" type="textarea" :rows="2" :placeholder="configPlaceholder(s.nodeType)" style="flex: 1" />
         <el-button-group>
           <el-button @click="move(i, -1)">↑</el-button>
           <el-button @click="move(i, 1)">↓</el-button>
-          <el-button type="danger" @click="steps.splice(i, 1)">删</el-button>
+          <el-button type="danger" @click="removeStep(s.nodeKey)">删</el-button>
         </el-button-group>
       </div>
+
+      <el-divider>连线（流程顺序 / 条件分支）</el-divider>
+      <div class="hint">条件节点：给它的出边设「真分支/假分支」，执行时按判断结果只走对应分支</div>
+      <div v-for="(e, i) in edges" :key="i" class="edge-row">
+        <el-select v-model="e.source" placeholder="源节点" style="width: 150px">
+          <el-option v-for="k in stepKeys" :key="k" :label="k" :value="k" />
+        </el-select>
+        <span class="arrow">→</span>
+        <el-select v-model="e.target" placeholder="目标节点" style="width: 150px">
+          <el-option v-for="k in stepKeys" :key="k" :label="k" :value="k" />
+        </el-select>
+        <el-select v-model="e.condition" style="width: 140px">
+          <el-option label="无条件" value="" />
+          <el-option label="真分支 (true)" value="true" />
+          <el-option label="假分支 (false)" value="false" />
+        </el-select>
+        <el-button type="danger" @click="edges.splice(i, 1)">删</el-button>
+      </div>
+      <el-button link type="primary" @click="addEdge">+ 添加连线</el-button>
+
       <template #footer>
         <el-checkbox v-model="publish" style="margin-right: 12px">发布</el-checkbox>
         <el-button @click="editorVisible = false">关闭</el-button>
@@ -71,7 +93,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { projectList } from '@/api/project'
 import { sceneList, sceneCreate, sceneUpdate, sceneDelete, sceneGraph, sceneVersionSave } from '@/api/scene'
@@ -87,9 +109,13 @@ const form = reactive<any>({})
 
 const editorVisible = ref(false)
 const steps = ref<any[]>([])
+const edges = ref<any[]>([])
 const currentSceneId = ref<number>()
 const currentSceneName = ref('')
 const publish = ref(false)
+let nextKey = 1
+
+const stepKeys = computed(() => steps.value.map((s) => s.nodeKey))
 
 const placeholders: Record<string, string> = {
   API: '{"method":"POST","url":"http://...","body":"{...}","assertions":[{"type":"bodyCode","expect":0}],"extracts":[{"varName":"token","path":"data.token"}]}',
@@ -142,7 +168,7 @@ async function run(row: any) {
   const loading = ElMessage.info('执行中...')
   try {
     const r: any = await execRun({ targetType: 'SCENE', targetId: row.id, projectId: projectId.value, environmentId: null })
-    ElMessage({ type: r.status === 'PASSED' ? 'success' : 'error', message: `执行完成: ${r.status} (${r.summaryJson})`, duration: 5000 })
+    ElMessage({ type: r.status === 'PASSED' ? 'success' : 'error', message: `已提交执行: ${r.status}，去「执行与报告」查看`, duration: 5000 })
   } finally {
     loading.close()
   }
@@ -155,15 +181,32 @@ async function openEditor(row: any) {
   try {
     const graph: any = await sceneGraph(row.id)
     const parsed = typeof graph === 'string' ? JSON.parse(graph) : graph
-    steps.value = (parsed.nodes || []).map((n: any) => ({ ...n, configText: JSON.stringify(n.config || {}) }))
+    steps.value = (parsed.nodes || []).map((n: any) => ({
+      nodeKey: n.nodeKey || 'node_' + (nextKey++),
+      nodeType: n.nodeType,
+      nodeName: n.nodeName || '',
+      configText: JSON.stringify(n.config || {})
+    }))
+    edges.value = (parsed.edges || []).map((e: any) => ({ source: e.source, target: e.target, condition: e.condition || '' }))
+    const maxNum = steps.value.reduce((m, s) => {
+      const n = parseInt(String(s.nodeKey).replace(/\D/g, ''), 10)
+      return isNaN(n) ? m : Math.max(m, n)
+    }, 0)
+    nextKey = maxNum + 1
   } catch {
     steps.value = []
+    edges.value = []
   }
   editorVisible.value = true
 }
 
 function addStep(type: string) {
-  steps.value.push({ nodeType: type, nodeName: '', configText: '' })
+  steps.value.push({ nodeKey: 'node_' + (nextKey++), nodeType: type, nodeName: '', configText: '' })
+}
+
+function removeStep(key: string) {
+  steps.value = steps.value.filter((s) => s.nodeKey !== key)
+  edges.value = edges.value.filter((e) => e.source !== key && e.target !== key)
 }
 
 function move(i: number, d: number) {
@@ -174,13 +217,18 @@ function move(i: number, d: number) {
   steps.value[j] = tmp
 }
 
+function addEdge() {
+  edges.value.push({ source: '', target: '', condition: '' })
+}
+
 async function saveEditor() {
-  const nodes = steps.value.map((s, i) => {
+  const nodes = steps.value.map((s) => {
     let config: any = {}
     try { config = s.configText ? JSON.parse(s.configText) : {} } catch { config = { raw: s.configText } }
-    return { nodeKey: 'node_' + (i + 1), nodeType: s.nodeType, nodeName: s.nodeName || (s.nodeType + '_' + (i + 1)), config }
+    return { nodeKey: s.nodeKey, nodeType: s.nodeType, nodeName: s.nodeName || s.nodeType, config }
   })
-  const graphJson = JSON.stringify({ nodes, edges: [] })
+  const validEdges = edges.value.filter((e) => e.source && e.target)
+  const graphJson = JSON.stringify({ nodes, edges: validEdges })
   await sceneVersionSave({ sceneId: currentSceneId.value, graphJson, publish: publish.value })
   ElMessage.success('版本已保存')
   editorVisible.value = false
@@ -198,6 +246,11 @@ onMounted(loadProjects)
   align-items: center;
   flex-wrap: wrap;
 }
+.hint {
+  font-size: 12px;
+  color: #98a2b3;
+  margin-bottom: 8px;
+}
 .step-row {
   display: flex;
   gap: 8px;
@@ -205,9 +258,20 @@ onMounted(loadProjects)
   margin-bottom: 8px;
 }
 .step-idx {
-  width: 24px;
+  width: 56px;
   line-height: 32px;
   text-align: center;
+  color: #98a2b3;
+  font-size: 12px;
+  cursor: help;
+}
+.edge-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.arrow {
   color: #98a2b3;
 }
 </style>

@@ -30,7 +30,7 @@ mybatis-plus:
 
 platform:
   jwt:
-    secret: ${JWT_SECRET:change-me-to-a-random-secret}
+    secret: ${JWT_SECRET:change-me-to-a-random-secret-at-least-32-bytes-long}
     expire-hours: 24
   runner:
     python: ${RUNNER_PYTHON:python}
