@@ -17,7 +17,7 @@
             <el-tag :type="row.status === 'PUBLISHED' ? 'success' : 'info'">{{ row.status }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="260">
+        <el-table-column label="操作" width="200">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEditor(row)">编排</el-button>
             <el-button link type="success" @click="run(row)">执行</el-button>
@@ -41,37 +41,50 @@
       </el-dialog>
     </div>
 
-    <!-- ============ 可视化 DAG 编排器（全屏） ============ -->
+    <!-- ============ 第一层：场景编辑主页面 ============ -->
     <div v-else class="flow-editor">
+      <!-- 顶部操作栏 -->
       <div class="editor-header">
-        <span class="title">场景编排 — {{ currentSceneName }}</span>
+        <span class="title">场景编辑 — {{ sceneForm.sceneName }}</span>
         <div class="header-actions">
-          <el-button size="small" @click="validate">静态校验</el-button>
+          <el-button size="small" @click="cancelEditor">取消</el-button>
+          <el-button size="small" type="success" @click="runEditor">执行</el-button>
           <el-button size="small" type="primary" @click="saveEditor">保存</el-button>
-          <el-button size="small" type="success" @click="runEditor">运行</el-button>
-          <el-checkbox v-model="publish" size="small" style="margin: 0 8px">发布</el-checkbox>
-          <el-button size="small" @click="closeEditor">关闭</el-button>
         </div>
       </div>
 
       <div class="editor-main">
-        <!-- 左：节点组件库 -->
-        <div class="left-palette">
-          <div class="palette-title">节点组件库</div>
-          <div
-            v-for="n in NODE_TYPES"
-            :key="n.type"
-            class="palette-item"
-            draggable="true"
-            @dragstart="onDragStart($event, n.type)"
-            @click="addNode(n.type)"
-          >
-            <span class="dot" :style="{ background: n.color }"></span>{{ n.label }}
+        <!-- 左侧：API 列表区 -->
+        <div class="left-api">
+          <el-tabs v-model="apiTab" class="api-tabs">
+            <el-tab-pane label="API 列表" name="all" />
+            <el-tab-pane label="未使用" name="unused" />
+            <el-tab-pane label="已使用" name="used" />
+          </el-tabs>
+          <el-button size="small" type="primary" class="add-api-btn" @click="addApiDialogVisible = true">添加 API</el-button>
+
+          <div class="api-list">
+            <div v-for="d in pagedApis" :key="d.id" class="api-item" :class="{ used: usedApiIds.has(d.id) }">
+              <div class="api-desc">{{ d.apiName }}</div>
+              <div class="api-meta">{{ d.serviceName }}</div>
+              <div class="api-path">{{ d.path }}</div>
+              <el-button v-if="!usedApiIds.has(d.id)" size="small" link type="primary" @click="addApiNode(d)">+ 选择</el-button>
+              <el-tag v-else size="small" type="success">已使用</el-tag>
+            </div>
+            <div v-if="!filteredApis.length" class="empty">暂无接口数据</div>
           </div>
-          <div class="palette-tip">拖拽或点击节点到画布</div>
+
+          <el-pagination
+            small
+            layout="prev, pager, next, total"
+            :total="filteredApis.length"
+            :page-size="apiPageSize"
+            v-model:current-page="apiPage"
+            class="api-pagination"
+          />
         </div>
 
-        <!-- 中：无限画布 -->
+        <!-- 中间：场景流程画布 -->
         <div class="center-canvas" @drop="onDrop" @dragover="onDragOver">
           <VueFlow
             v-model:nodes="nodes"
@@ -91,69 +104,81 @@
           </VueFlow>
         </div>
 
-        <!-- 右：节点配置 -->
-        <div class="right-config">
-          <div class="config-title">{{ selectedEdge ? '连线配置' : '节点配置' }}</div>
-          <template v-if="selectedNode">
-            <div class="cfg-row">
-              <span class="lbl">类型</span>
-              <el-tag size="small">{{ nodeTypeLabel(selectedNode.data.nodeType) }}</el-tag>
-            </div>
-            <div class="cfg-row">
-              <span class="lbl">名称</span>
-              <el-input v-model="selectedNode.data.label" size="small" />
-            </div>
-            <div class="cfg-col">
-              <span class="lbl">配置 JSON</span>
-              <el-input v-model="selectedNode.data.configText" type="textarea" :rows="12" :placeholder="configPlaceholder(selectedNode.data.nodeType)" />
-            </div>
-          </template>
-          <template v-else-if="selectedEdge">
-            <div class="cfg-row">
-              <span class="lbl">连线条件</span>
-              <el-select v-model="selectedEdge.data.condition" size="small" @change="syncEdgeLabel(selectedEdge)">
-                <el-option label="无条件" value="" />
-                <el-option label="真分支 (true)" value="true" />
-                <el-option label="假分支 (false)" value="false" />
-              </el-select>
-            </div>
-            <div class="cfg-tip">条件分支节点的出边需设 true/false；其余节点出边留空即可。</div>
-          </template>
-          <template v-else>
-            <div class="cfg-tip">点击画布中的节点或连线进行配置</div>
-          </template>
+        <!-- 右侧：管理功能区 -->
+        <div class="right-manage">
+          <el-tabs v-model="rightTab" class="manage-tabs">
+            <el-tab-pane label="基础信息" name="base">
+              <el-form label-width="70px" size="small">
+                <el-form-item label="名称"><el-input v-model="sceneForm.sceneName" /></el-form-item>
+                <el-form-item label="描述"><el-input v-model="sceneForm.description" type="textarea" :rows="3" /></el-form-item>
+                <el-form-item label="项目"><el-input :model-value="projectName" disabled /></el-form-item>
+                <el-form-item label="版本"><span>v{{ sceneForm.currentVersion }}</span></el-form-item>
+                <el-form-item label="状态"><el-tag size="small">{{ sceneForm.status }}</el-tag></el-form-item>
+              </el-form>
+            </el-tab-pane>
+
+            <el-tab-pane label="上下文管理" name="context">
+              <div class="ctx-tip">场景级变量（节点可读取/输出）</div>
+              <div v-for="(v, k) in variables" :key="k" class="var-row">
+                <el-input :model-value="k" disabled size="small" class="var-k" />
+                <el-input v-model="variables[k]" size="small" class="var-v" />
+                <el-button size="small" link type="danger" @click="deleteVariable(k)">删</el-button>
+              </div>
+              <div class="ctx-add">
+                <el-input v-model="newVarKey" placeholder="变量名" size="small" class="var-k" />
+                <el-input v-model="newVarValue" placeholder="变量值" size="small" class="var-v" />
+                <el-button size="small" type="primary" @click="addVariable">添加</el-button>
+              </div>
+            </el-tab-pane>
+
+            <el-tab-pane label="脚本管理" name="script">
+              <div class="ctx-tip">已绑定脚本的节点</div>
+              <div v-for="n in scriptNodes" :key="n.id" class="script-item" @click="openNodeDetail(n)">
+                <span class="s-name">{{ n.data.label }}</span>
+                <span class="s-tag">Python</span>
+              </div>
+              <div v-if="!scriptNodes.length" class="empty">暂无脚本节点</div>
+            </el-tab-pane>
+
+            <el-tab-pane label="流程管理" name="flow">
+              <div class="ctx-tip">节点</div>
+              <div v-for="n in nodes" :key="n.id" class="flow-item">
+                <span class="f-type">{{ typeTag(n.data.nodeType) }}</span>
+                <span class="f-name">{{ n.data.label }}</span>
+              </div>
+              <div class="ctx-tip" style="margin-top: 10px">连线</div>
+              <div v-for="e in edges" :key="e.id" class="flow-item">
+                {{ nodeLabel(e.source) }} → {{ nodeLabel(e.target) }}
+                <el-tag v-if="e.data?.condition" size="small" style="margin-left: 6px">{{ e.data.condition }}</el-tag>
+              </div>
+            </el-tab-pane>
+          </el-tabs>
         </div>
       </div>
-
-      <!-- 底部：运行日志 + 变量 -->
-      <div class="bottom-panel">
-        <el-tabs v-model="bottomTab" class="bottom-tabs">
-          <el-tab-pane label="运行日志" name="log">
-            <div class="log-box">
-              <div v-for="(l, i) in logs" :key="i" class="log-line" :class="{ err: l.logLevel === 'ERROR' }">
-                [{{ l.logLevel }}] {{ l.message }}
-              </div>
-              <div v-if="!logs.length" class="log-empty">暂无日志，点「运行」开始执行</div>
-            </div>
-          </el-tab-pane>
-          <el-tab-pane label="变量" name="vars">
-            <div class="vars-box">
-              <div v-for="(v, k) in variables" :key="k" class="var-row">
-                <span class="k">{{ k }}</span><span class="v">{{ v }}</span>
-              </div>
-              <div v-if="!Object.keys(variables).length" class="log-empty">暂无变量</div>
-            </div>
-          </el-tab-pane>
-        </el-tabs>
-      </div>
     </div>
+
+    <!-- 添加 API 弹窗（分页选择） -->
+    <el-dialog v-model="addApiDialogVisible" title="添加 API" width="720px">
+      <el-table :data="pagedApis" border stripe size="small" @row-click="addApiNode">
+        <el-table-column prop="apiName" label="接口描述" min-width="160" />
+        <el-table-column prop="serviceName" label="服务名称" min-width="140" />
+        <el-table-column prop="path" label="接口路径" min-width="220" />
+        <el-table-column label="操作" width="80">
+          <template #default="{ row }">
+            <el-button v-if="!usedApiIds.has(row.id)" size="small" link type="primary" @click.stop="addApiNode(row)">选择</el-button>
+            <el-tag v-else size="small" type="success">已使用</el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-pagination small layout="prev, pager, next" :total="filteredApis.length" :page-size="apiPageSize" v-model:current-page="apiPage" />
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, markRaw, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { VueFlow, useVueFlow } from '@vue-flow/core'
+import { computed, markRaw, onMounted, reactive, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { VueFlow } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import { MiniMap } from '@vue-flow/minimap'
@@ -164,40 +189,21 @@ import '@vue-flow/minimap/dist/style.css'
 import SceneNode from '@/components/SceneNode.vue'
 import { projectList } from '@/api/project'
 import { sceneList, sceneCreate, sceneUpdate, sceneDelete, sceneGraph, sceneVersionSave } from '@/api/scene'
-import { execRun, execDetail } from '@/api/exec'
+import { execRun } from '@/api/exec'
+import { definitionList, serviceList } from '@/api/asset'
 
 const nodeTypes = markRaw({ scene: SceneNode })
 
-const NODE_TYPES = [
-  { type: 'START', label: '开始', color: '#16a34a' },
-  { type: 'END', label: '结束', color: '#ca8a04' },
-  { type: 'API', label: 'API 请求', color: '#2563eb' },
-  { type: 'UI', label: 'UI 操作', color: '#7c3aed' },
-  { type: 'ASSERT', label: '断言', color: '#dc2626' },
-  { type: 'EXTRACT', label: '变量提取', color: '#0891b2' },
-  { type: 'CONDITION', label: '条件分支', color: '#ea580c' },
-  { type: 'LOOP', label: '循环', color: '#db2777' },
-  { type: 'WAIT', label: '等待', color: '#64748b' },
-  { type: 'SUBSCENE', label: '子场景', color: '#0d9488' },
-  { type: 'DATASET', label: '数据集迭代', color: '#4f46e5' },
-  { type: 'SCRIPT', label: '脚本', color: '#475569' }
-]
-
-const PLACEHOLDERS: Record<string, string> = {
-  START: '{}',
-  END: '{}',
-  API: '{"method":"POST","url":"http://...","body":"{...}","assertions":[{"type":"bodyCode","expect":0}],"extracts":[{"varName":"token","path":"data.token"}]}',
-  UI: '{"baseUrl":"http://...","steps":[{"action":"click","locator":{"strategy":"DATA_TESTID","value":"xxx"}}]}',
-  ASSERT: '{"type":"bodyCode","expect":0}',
-  EXTRACT: '{"varName":"token","path":"data.token"}',
-  CONDITION: '{"left":"${status}","op":"EQ","right":"0"}',
-  LOOP: '{"maxIterations":10,"condition":{"left":"${i}","op":"LT","right":"10"}}',
-  WAIT: '{"millis":1000}',
-  SUBSCENE: '{"sceneId":0}',
-  DATASET: '{"datasetRef":"xxx","itemVar":"row"}',
-  SCRIPT: '{"language":"python","code":"..."}'
+const TYPE_TAGS: Record<string, string> = {
+  START: '开始', END: '结束', API: 'API', UI: 'UI', ASSERT: '断言',
+  EXTRACT: '变量提取', CONDITION: '条件分支', LOOP: '循环', WAIT: '等待',
+  SUBSCENE: '子场景', DATASET: '数据集迭代', SCRIPT: '脚本'
+}
+function typeTag(t: string) {
+  return TYPE_TAGS[t] || t
 }
 
+// ---- 列表页 ----
 const projects = ref<any[]>([])
 const projectId = ref<number>()
 const records = ref<any[]>([])
@@ -206,35 +212,46 @@ const query = reactive({ page: 1, pageSize: 10 })
 const dialogVisible = ref(false)
 const form = reactive<any>({})
 
+// ---- 编辑器状态 ----
 const editorVisible = ref(false)
 const currentSceneId = ref<number>()
-const currentSceneName = ref('')
-const publish = ref(false)
-
+const sceneForm = reactive<any>({})
 const nodes = ref<any[]>([])
 const edges = ref<any[]>([])
 const selectedNodeId = ref<string | null>(null)
 const selectedEdgeId = ref<string | null>(null)
-const bottomTab = ref('log')
-const logs = ref<any[]>([])
+const rightTab = ref('base')
+const apiTab = ref('all')
+const apiPage = ref(1)
+const apiPageSize = 10
+const apiDefs = ref<any[]>([])
+const services = ref<any[]>([])
 const variables = ref<Record<string, any>>({})
-
+const newVarKey = ref('')
+const newVarValue = ref('')
+const addApiDialogVisible = ref(false)
 let nodeSeq = 0
 let edgeSeq = 0
-let pollTimer: any = null
-const { screenToFlowCoordinate } = useVueFlow()
 
+const projectName = computed(() => projects.value.find((p) => p.id === projectId.value)?.projectName || '')
+const usedApiIds = computed(() => new Set(nodes.value.map((n) => n.data?.apiDefinitionId).filter(Boolean)))
+const filteredApis = computed(() => {
+  if (apiTab.value === 'used') return apiDefs.value.filter((d) => usedApiIds.value.has(d.id))
+  if (apiTab.value === 'unused') return apiDefs.value.filter((d) => !usedApiIds.value.has(d.id))
+  return apiDefs.value
+})
+const pagedApis = computed(() => {
+  const s = (apiPage.value - 1) * apiPageSize
+  return filteredApis.value.slice(s, s + apiPageSize)
+})
+const scriptNodes = computed(() => nodes.value.filter((n) => n.data?.script))
 const selectedNode = computed(() => nodes.value.find((n) => n.id === selectedNodeId.value) || null)
-const selectedEdge = computed(() => edges.value.find((e) => e.id === selectedEdgeId.value) || null)
 
-function nodeTypeLabel(t: string) {
-  return NODE_TYPES.find((n) => n.type === t)?.label || t
-}
-function configPlaceholder(t: string) {
-  return PLACEHOLDERS[t] || ''
+function nodeLabel(id: string) {
+  return nodes.value.find((n) => n.id === id)?.data?.label || id
 }
 
-// ---- 列表 ----
+// ---- 列表页方法 ----
 async function loadProjects() {
   const data: any = await projectList({ page: 1, pageSize: 100 })
   projects.value = data.records
@@ -271,49 +288,71 @@ async function run(row: any) {
   ElMessage.success('已提交执行，去「执行与报告」查看')
 }
 
-// ---- 画布拖拽 ----
-function onDragStart(event: DragEvent, type: string) {
-  if (event.dataTransfer) {
-    event.dataTransfer.setData('application/vueflow', type)
-    event.dataTransfer.effectAllowed = 'move'
-  }
+// ---- API 列表 ----
+async function loadApis() {
+  const [defs, svcs]: any[] = await Promise.all([
+    definitionList(projectId.value!),
+    serviceList(projectId.value!)
+  ])
+  services.value = svcs || []
+  const svcMap = new Map(services.value.map((s: any) => [s.id, s.serviceName]))
+  apiDefs.value = (defs || []).map((d: any) => ({ ...d, serviceName: svcMap.get(d.serviceId) || '—' }))
 }
+
+// ---- 画布 ----
 function onDragOver(event: DragEvent) {
   event.preventDefault()
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
 }
-function onDrop(event: DragEvent) {
-  const type = event.dataTransfer?.getData('application/vueflow')
-  if (!type) return
-  let position = { x: 100 + (nodeSeq % 5) * 200, y: 80 + Math.floor(nodeSeq / 5) * 120 }
-  try {
-    position = screenToFlowCoordinate({ x: event.clientX, y: event.clientY })
-  } catch {
-    /* 初始化前兜底 */
-  }
-  addNode(type, position)
+function onDrop() {
+  /* 预留：支持从 API 列表拖入 */
 }
-function addNode(type: string, position?: { x: number; y: number }) {
-  const meta = NODE_TYPES.find((n) => n.type === type)
+function addApiNode(api: any) {
   const id = `node_${++nodeSeq}`
   nodes.value.push({
     id,
     type: 'scene',
-    position: position || { x: 100 + (nodeSeq % 5) * 200, y: 80 + Math.floor(nodeSeq / 5) * 120 },
-    data: { nodeType: type, label: meta?.label || type, configText: '' }
+    position: { x: 120 + (nodeSeq % 4) * 220, y: 100 + Math.floor(nodeSeq / 4) * 140 },
+    data: {
+      nodeType: 'API',
+      label: api.apiName,
+      apiDefinitionId: api.id,
+      apiPath: api.path,
+      apiMethod: api.httpMethod,
+      script: genScriptTemplate(api),
+      configText: '{}'
+    }
   })
   selectedNodeId.value = id
-  selectedEdgeId.value = null
+  addApiDialogVisible.value = false
+}
+function genScriptTemplate(api: any) {
+  return `# -*- coding: utf-8 -*-
+"""
+脚本名称：${api.apiName}
+接口：${api.httpMethod || 'GET'} ${api.path}
+说明：自动生成的初始模板，请按需修改
+"""
+import json
+
+
+def init_result(code=0, msg="success", data=None):
+    return {"code": code, "msg": msg, "data": data}
+
+
+def execute(ctx):
+    """节点执行入口，ctx 提供请求上下文与前序节点变量"""
+    api_data = ctx.get("api", {})
+    params = api_data.get("params", {})
+    # 在此发起请求并处理响应（由执行器注入真实请求能力）
+    response = {}
+    return init_result(data=response)
+`
 }
 function onConnect(params: any) {
   const id = `edge_${++edgeSeq}`
   edges.value.push({ id, source: params.source, target: params.target, label: '', data: { condition: '' } })
 }
-function syncEdgeLabel(e: any) {
-  e.label = e.data.condition || ''
-}
-
-// ---- 选中 ----
 function onNodeClick({ node }: any) {
   selectedNodeId.value = node.id
   selectedEdgeId.value = null
@@ -327,23 +366,36 @@ function onPaneClick() {
   selectedEdgeId.value = null
 }
 
-// ---- 打开/关闭 ----
+// ---- 打开/取消 ----
 async function openEditor(row: any) {
   currentSceneId.value = row.id
-  currentSceneName.value = row.sceneName
-  publish.value = false
+  Object.assign(sceneForm, {
+    sceneName: row.sceneName,
+    description: row.description || '',
+    currentVersion: row.currentVersion,
+    status: row.status
+  })
   nodes.value = []
   edges.value = []
-  logs.value = []
   variables.value = {}
+  apiPage.value = 1
   try {
     const graph: any = await sceneGraph(row.id)
     const parsed = typeof graph === 'string' ? JSON.parse(graph) : graph
+    variables.value = parsed.variables || {}
     nodes.value = (parsed.nodes || []).map((n: any) => ({
       id: n.nodeKey || `node_${++nodeSeq}`,
       type: 'scene',
-      position: { x: 100 + (nodeSeq % 5) * 200, y: 80 + Math.floor(nodeSeq / 5) * 120 },
-      data: { nodeType: n.nodeType, label: n.nodeName || n.nodeType, configText: JSON.stringify(n.config || {}) }
+      position: { x: 120 + (nodeSeq % 4) * 220, y: 100 + Math.floor(nodeSeq / 4) * 140 },
+      data: {
+        nodeType: n.nodeType,
+        label: n.nodeName || n.nodeType,
+        apiDefinitionId: n.apiDefinitionId || null,
+        apiPath: n.apiPath || '',
+        apiMethod: n.apiMethod || '',
+        script: n.script || '',
+        configText: JSON.stringify(n.config || {})
+      }
     }))
     edges.value = (parsed.edges || []).map((e: any) => ({
       id: `edge_${++edgeSeq}`,
@@ -358,34 +410,30 @@ async function openEditor(row: any) {
     nodes.value = []
     edges.value = []
   }
+  await loadApis()
   editorVisible.value = true
 }
-function closeEditor() {
-  editorVisible.value = false
-  stopPoll()
-}
-
-// ---- 校验 / 保存 / 运行 ----
-function validate() {
-  const hasStart = nodes.value.some((n) => n.data.nodeType === 'START')
-  const hasEnd = nodes.value.some((n) => n.data.nodeType === 'END')
-  const ids = new Set(nodes.value.map((n) => n.id))
-  const linked = new Set<string>()
-  edges.value.forEach((e) => {
-    linked.add(e.source)
-    linked.add(e.target)
-  })
-  const orphan = nodes.value.filter((n) => !linked.has(n.id) && n.data.nodeType !== 'START' && n.data.nodeType !== 'END')
-  const problems: string[] = []
-  if (!hasStart) problems.push('缺少「开始」节点')
-  if (!hasEnd) problems.push('缺少「结束」节点')
-  if (orphan.length) problems.push(`存在孤立节点：${orphan.map((n) => n.data.label).join('、')}`)
-  if (problems.length) {
-    ElMessage.warning(problems.join('；'))
-  } else {
-    ElMessage.success('静态校验通过')
+async function cancelEditor() {
+  try {
+    await ElMessageBox.confirm('确定退出编辑？未保存的修改将丢失。', '提示', { type: 'warning' })
+    editorVisible.value = false
+  } catch {
+    /* 取消 */
   }
 }
+
+// ---- 上下文变量 ----
+function addVariable() {
+  if (!newVarKey.value) return
+  variables.value[newVarKey.value] = newVarValue.value
+  newVarKey.value = ''
+  newVarValue.value = ''
+}
+function deleteVariable(k: string) {
+  delete variables.value[k]
+}
+
+// ---- 保存 / 执行 ----
 function buildGraphJson() {
   const graphNodes = nodes.value.map((n) => {
     let config: any = {}
@@ -394,59 +442,38 @@ function buildGraphJson() {
     } catch {
       config = { raw: n.data.configText }
     }
-    return { nodeKey: n.id, nodeType: n.data.nodeType, nodeName: n.data.label || n.data.nodeType, config }
+    return {
+      nodeKey: n.id,
+      nodeType: n.data.nodeType,
+      nodeName: n.data.label || n.data.nodeType,
+      apiDefinitionId: n.data.apiDefinitionId || null,
+      apiPath: n.data.apiPath || '',
+      apiMethod: n.data.apiMethod || '',
+      script: n.data.script || '',
+      config
+    }
   })
   const graphEdges = edges.value.map((e) => ({ source: e.source, target: e.target, condition: e.data?.condition || '' }))
-  return JSON.stringify({ nodes: graphNodes, edges: graphEdges })
+  return JSON.stringify({ nodes: graphNodes, edges: graphEdges, variables: variables.value })
 }
 async function saveEditor() {
-  await sceneVersionSave({ sceneId: currentSceneId.value, graphJson: buildGraphJson(), publish: publish.value })
-  ElMessage.success('版本已保存')
+  await sceneUpdate({ id: currentSceneId.value, projectId: projectId.value, sceneName: sceneForm.sceneName, description: sceneForm.description })
+  await sceneVersionSave({ sceneId: currentSceneId.value, graphJson: buildGraphJson(), publish: false })
+  ElMessage.success('已保存')
 }
 async function runEditor() {
   await saveEditor()
-  const r: any = await execRun({ targetType: 'SCENE', targetId: currentSceneId.value, projectId: projectId.value, environmentId: null })
-  logs.value = []
-  variables.value = {}
-  bottomTab.value = 'log'
-  startPoll(r.id)
-  ElMessage.success('已提交执行')
+  await execRun({ targetType: 'SCENE', targetId: currentSceneId.value, projectId: projectId.value, environmentId: null })
+  ElMessage.success('已提交执行，去「执行与报告」查看')
 }
-function startPoll(executionId: number) {
-  stopPoll()
-  const tick = async () => {
-    try {
-      const d: any = await execDetail(executionId)
-      logs.value = d.logs || []
-      const vs = (d.logs || []).find((l: any) => l.message && l.message.startsWith('变量快照:'))
-      if (vs) {
-        try {
-          variables.value = JSON.parse(vs.message.replace('变量快照:', '').trim())
-        } catch {
-          /* ignore */
-        }
-      }
-      const st = d.execution?.status
-      if (st === 'RUNNING' || st === 'QUEUED') {
-        pollTimer = setTimeout(tick, 1500)
-      } else if (st) {
-        ElMessage({ type: st === 'PASSED' ? 'success' : 'error', message: `执行完成：${st}` })
-      }
-    } catch {
-      pollTimer = setTimeout(tick, 2000)
-    }
-  }
-  pollTimer = setTimeout(tick, 300)
-}
-function stopPoll() {
-  if (pollTimer) {
-    clearTimeout(pollTimer)
-    pollTimer = null
-  }
+
+// ---- 第二层节点详情入口（第三步实现）----
+function openNodeDetail(n: any) {
+  selectedNodeId.value = n.id
+  ElMessage.info('节点详情编辑页在第三步实现')
 }
 
 onMounted(loadProjects)
-onUnmounted(stopPoll)
 </script>
 
 <style scoped>
@@ -460,7 +487,7 @@ onUnmounted(stopPoll)
   padding: 0;
 }
 
-/* 全屏编排器 */
+/* 第一层编辑器 */
 .flow-editor {
   position: fixed;
   inset: 0;
@@ -483,7 +510,6 @@ onUnmounted(stopPoll)
 }
 .header-actions {
   display: flex;
-  align-items: center;
   gap: 6px;
 }
 .editor-main {
@@ -491,122 +517,128 @@ onUnmounted(stopPoll)
   display: flex;
   overflow: hidden;
 }
-.left-palette {
-  width: 180px;
+
+/* 左：API 列表 */
+.left-api {
+  width: 300px;
   border-right: 1px solid #e5e7eb;
-  padding: 10px;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   background: #fafafa;
 }
-.palette-title {
-  font-weight: 600;
-  margin-bottom: 10px;
-  color: #374151;
+.api-tabs :deep(.el-tabs__header) {
+  margin: 0;
+  padding: 0 8px;
 }
-.palette-item {
+.add-api-btn {
+  margin: 8px;
+}
+.api-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 8px;
+}
+.api-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: #fff;
+  position: relative;
+}
+.api-item.used {
+  opacity: 0.7;
+}
+.api-desc {
+  font-size: 13px;
+  color: #1f2937;
+  padding-right: 60px;
+}
+.api-meta {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-top: 2px;
+}
+.api-path {
+  font-size: 11px;
+  color: #6b7280;
+  margin-top: 2px;
+  word-break: break-all;
+}
+.api-item .el-button,
+.api-item .el-tag {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+.api-pagination {
+  padding: 8px;
+}
+.empty {
+  color: #9ca3af;
+  text-align: center;
+  margin-top: 20px;
+  font-size: 13px;
+}
+
+/* 中：画布 */
+.center-canvas {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  background: #f8fafc;
+}
+
+/* 右：管理区 */
+.right-manage {
+  width: 320px;
+  border-left: 1px solid #e5e7eb;
+  background: #fafafa;
+  overflow-y: auto;
+  padding: 0 12px;
+}
+.manage-tabs :deep(.el-tabs__header) {
+  margin: 0;
+}
+.ctx-tip {
+  font-size: 12px;
+  color: #9ca3af;
+  margin: 8px 0;
+}
+.var-row,
+.ctx-add {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+  align-items: center;
+}
+.var-k {
+  width: 100px;
+}
+.var-v {
+  flex: 1;
+}
+.script-item,
+.flow-item {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
   border: 1px solid #e5e7eb;
   border-radius: 6px;
-  margin-bottom: 8px;
-  cursor: grab;
+  margin-bottom: 6px;
   background: #fff;
   font-size: 13px;
+  cursor: pointer;
+}
+.s-name,
+.f-name {
+  flex: 1;
   color: #1f2937;
 }
-.palette-item:active {
-  cursor: grabbing;
-}
-.dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.palette-tip {
-  font-size: 12px;
-  color: #9ca3af;
-  margin-top: 10px;
-}
-.center-canvas {
-  flex: 1;
-  min-width: 0;
-  position: relative;
-}
-.right-config {
-  width: 300px;
-  border-left: 1px solid #e5e7eb;
-  padding: 12px;
-  overflow-y: auto;
-  background: #fafafa;
-}
-.config-title {
-  font-weight: 600;
-  margin-bottom: 12px;
-  color: #374151;
-}
-.cfg-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.cfg-col {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.lbl {
-  width: 60px;
-  font-size: 12px;
+.s-tag,
+.f-type {
+  font-size: 11px;
   color: #6b7280;
-  flex-shrink: 0;
-}
-.cfg-tip {
-  font-size: 12px;
-  color: #9ca3af;
-  line-height: 1.6;
-}
-.bottom-panel {
-  height: 200px;
-  border-top: 1px solid #e5e7eb;
-  padding: 0 12px;
-  overflow: hidden;
-}
-.bottom-tabs {
-  height: 100%;
-}
-.log-box,
-.vars-box {
-  height: 150px;
-  overflow-y: auto;
-  font-family: Consolas, Monaco, monospace;
-  font-size: 12px;
-}
-.log-line {
-  padding: 2px 0;
-  color: #374151;
-}
-.log-line.err {
-  color: #dc2626;
-}
-.log-empty {
-  color: #9ca3af;
-  margin-top: 10px;
-}
-.var-row {
-  display: flex;
-  gap: 12px;
-  padding: 2px 0;
-}
-.var-row .k {
-  color: #2563eb;
-  min-width: 120px;
-}
-.var-row .v {
-  color: #374151;
-  word-break: break-all;
 }
 </style>
