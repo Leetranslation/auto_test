@@ -1,0 +1,9 @@
+{
+  "baseUrl": "http://127.0.0.1:8090",
+  "timeoutMs": 15000,
+  "steps": [
+    { "action": "open", "url": "/login" },
+    { "action": "assert", "locator": { "strategy": "TEXT", "value": "Token 制造" }, "visible": true },
+    { "action": "screenshot" }
+  ]
+}
